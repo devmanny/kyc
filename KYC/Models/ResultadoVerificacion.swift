@@ -31,13 +31,12 @@ struct ResultadoVerificacion: Sendable {
         cercanaVsLejana: Float,
         datosPersona: DatosINEFrente?
     ) -> ResultadoVerificacion {
-        // Convertir a porcentajes
+        // Convertir a porcentajes (solo las comparaciones INE vs selfies)
         let porcINEvsCercana = ineVsCercana * 100
         let porcINEvsLejana = ineVsLejana * 100
-        let porcCercanavsLejana = cercanaVsLejana * 100
 
-        // Si CUALQUIER puntuación es menor a 60%, es fallida (roja)
-        let algunaRoja = porcINEvsCercana < 60 || porcINEvsLejana < 60 || porcCercanavsLejana < 60
+        // Si CUALQUIER puntuación INE es menor a 60%, es fallida (roja)
+        let algunaRoja = porcINEvsCercana < 60 || porcINEvsLejana < 60
 
         let promedioINE = (porcINEvsCercana + porcINEvsLejana) / 2.0
 

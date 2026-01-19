@@ -142,7 +142,6 @@ struct ResultadoView: View {
             VStack(spacing: 10) {
                 puntuacionRow(titulo: "INE vs Selfie cercana", valor: resultado.puntuacionINEvsCercana)
                 puntuacionRow(titulo: "INE vs Selfie lejana", valor: resultado.puntuacionINEvsLejana)
-                puntuacionRow(titulo: "Selfie cercana vs lejana", valor: resultado.puntuacionCercanavsLejana)
             }
             .padding(16)
             .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 16))
