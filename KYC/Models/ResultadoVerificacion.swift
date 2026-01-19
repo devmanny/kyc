@@ -31,33 +31,33 @@ struct ResultadoVerificacion: Sendable {
         cercanaVsLejana: Float,
         datosPersona: DatosINEFrente?
     ) -> ResultadoVerificacion {
-        let promedioINE = (ineVsCercana + ineVsLejana) / 2.0
+        // Convertir a porcentajes
+        let porcINEvsCercana = ineVsCercana * 100
+        let porcINEvsLejana = ineVsLejana * 100
+        let porcCercanavsLejana = cercanaVsLejana * 100
 
-        // Las selfies entre sí deben ser muy similares (misma persona, mismo momento)
-        let selfiesConsistentes = cercanaVsLejana > 0.70
+        // Si CUALQUIER puntuación es menor a 60%, es fallida (roja)
+        let algunaRoja = porcINEvsCercana < 60 || porcINEvsLejana < 60 || porcCercanavsLejana < 60
+
+        let promedioINE = (porcINEvsCercana + porcINEvsLejana) / 2.0
 
         let (esMatch, confianza, mensaje): (Bool, NivelConfianza, String)
 
-        if !selfiesConsistentes {
+        if algunaRoja {
+            // Cualquier puntuación < 60%: Roja - Fallida
             esMatch = false
             confianza = .fallida
-            mensaje = "Las selfies no parecen ser de la misma persona"
-        } else if promedioINE > 0.75 {
+            mensaje = "No hay coincidencia suficiente entre las imágenes"
+        } else if promedioINE >= 70 {
+            // 70-100%: Verde - Alta confianza
             esMatch = true
             confianza = .alta
             mensaje = "Alta coincidencia con la fotografía de la INE"
-        } else if promedioINE > 0.60 {
+        } else {
+            // 60-69%: Amarilla - Media confianza
             esMatch = true
             confianza = .media
             mensaje = "Coincidencia moderada con la fotografía de la INE"
-        } else if promedioINE > 0.50 {
-            esMatch = false
-            confianza = .baja
-            mensaje = "Baja coincidencia - posible que no sea la misma persona"
-        } else {
-            esMatch = false
-            confianza = .fallida
-            mensaje = "No hay coincidencia con la fotografía de la INE"
         }
 
         return ResultadoVerificacion(

@@ -243,8 +243,9 @@ struct ResultadoView: View {
     }
 
     private func colorPuntuacion(_ valor: Float) -> Color {
-        if valor > 0.75 { return .green }
-        if valor > 0.60 { return .orange }
+        let porcentaje = valor * 100
+        if porcentaje >= 70 { return .green }
+        if porcentaje >= 60 { return .orange }
         return .red
     }
 }
