@@ -31,12 +31,22 @@ struct CapturaINEView: View {
 
     @StateObject private var cameraService = CameraService()
     @State private var fotoPreview: UIImage?
+    @State private var fotoOriginal: UIImage? // Foto sin recortar para enviar
     @State private var mostrandoPreview = false
     @State private var errorCamara: String?
     @State private var puntoEnfoque: CGPoint?
     @State private var mostrarIndicadorEnfoque = false
     @State private var mostrarConfiguracion = false
     @State private var previewSize: CGSize = .zero
+
+    // Auto-captura
+    @State private var autoCapturaHabilitada = true
+    @State private var tiempoDocumentoDetectado: Date?
+    @State private var capturando = false
+    @State private var procesandoPreview = false
+
+    private let faceDetectionService = FaceDetectionService()
+    private let tiempoEsperaAutoCaptura: TimeInterval = 1.0 // Esperar 1 segundo de estabilidad
 
     var body: some View {
         ZStack {
@@ -131,6 +141,15 @@ struct CapturaINEView: View {
             .onChange(of: geometry.size) { _, newSize in
                 let fullHeight = newSize.height + safeTop + safeBottom
                 previewSize = CGSize(width: newSize.width, height: fullHeight)
+            }
+            // Auto-captura cuando se detecta documento y está enfocado
+            .onChange(of: cameraService.documentoDetectado) { _, detectado in
+                manejarCambioDeteccion(detectado: detectado)
+            }
+            .onChange(of: cameraService.estaEnfocando) { _, enfocando in
+                if !enfocando && cameraService.documentoDetectado {
+                    manejarCambioDeteccion(detectado: true)
+                }
             }
         }
         .ignoresSafeArea(edges: .bottom)
@@ -232,11 +251,13 @@ struct CapturaINEView: View {
         GeometryReader { geometry in
             let width = geometry.size.width * 0.9
             let height = width / 1.586 // Proporción de tarjeta INE
+            let colorMarco = cameraService.documentoDetectado ? Color.green : Color.white
 
             RoundedRectangle(cornerRadius: 12)
-                .stroke(Color.white, lineWidth: 3)
+                .stroke(colorMarco, lineWidth: cameraService.documentoDetectado ? 4 : 3)
                 .frame(width: width, height: height)
                 .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+                .animation(.easeInOut(duration: 0.2), value: cameraService.documentoDetectado)
         }
     }
 
@@ -244,16 +265,28 @@ struct CapturaINEView: View {
         VStack(spacing: 12) {
             // Indicador de estado con Liquid Glass
             HStack(spacing: 8) {
-                if cameraService.estaEnfocando {
+                if procesandoPreview {
+                    ProgressView()
+                        .tint(.blue)
+                    Text("Procesando...")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                } else if cameraService.estaEnfocando {
                     ProgressView()
                         .tint(.yellow)
                     Text("Enfocando...")
                         .font(.caption)
                         .fontWeight(.medium)
-                } else if cameraService.estaListo {
-                    Image(systemName: "checkmark.circle.fill")
+                } else if cameraService.documentoDetectado {
+                    Image(systemName: "doc.viewfinder.fill")
                         .foregroundStyle(.green)
-                    Text("Listo")
+                    Text(tiempoDocumentoDetectado != nil ? "Capturando..." : "INE detectada")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                } else if cameraService.estaListo {
+                    Image(systemName: "viewfinder")
+                        .foregroundStyle(.white.opacity(0.7))
+                    Text("Busca la INE")
                         .font(.caption)
                         .fontWeight(.medium)
                 }
@@ -263,7 +296,7 @@ struct CapturaINEView: View {
             .padding(.vertical, 8)
             .glassEffect(.regular, in: .capsule)
 
-            // Botón de captura estilo iOS 26
+            // Botón de captura estilo iOS 26 (para captura manual)
             Button(action: capturarFoto) {
                 ZStack {
                     // Anillo exterior con glass
@@ -272,14 +305,14 @@ struct CapturaINEView: View {
                         .frame(width: 80, height: 80)
                         .glassEffect(.regular, in: .circle)
 
-                    // Círculo interior blanco
+                    // Círculo interior - verde cuando detecta documento
                     Circle()
-                        .fill(.white)
+                        .fill(cameraService.documentoDetectado ? .green : .white)
                         .frame(width: 64, height: 64)
                 }
             }
-            .disabled(!cameraService.estaListo)
-            .opacity(cameraService.estaListo ? 1 : 0.5)
+            .disabled(!cameraService.estaListo || capturando)
+            .opacity(cameraService.estaListo && !capturando ? 1 : 0.5)
         }
     }
 
@@ -354,6 +387,7 @@ struct CapturaINEView: View {
     private func configurarCamara() async {
         do {
             try await cameraService.configurarCamara(tipo: .trasera)
+            cameraService.activarDeteccionDocumento()
             cameraService.iniciarCaptura()
         } catch {
             errorCamara = "No se pudo acceder a la cámara. Verifica los permisos en Configuración."
@@ -361,14 +395,35 @@ struct CapturaINEView: View {
     }
 
     private func capturarFoto() {
+        guard !capturando else { return }
+        capturando = true
+        procesandoPreview = true
+
         Task {
-            // Para INE: usar imagen completa (sin recortar) para mejor detección de rostro y OCR
-            // El recorte puede afectar la calidad y cortar partes importantes
-            if let foto = await cameraService.capturarFoto() {
-                fotoPreview = foto
-                mostrandoPreview = true
-                cameraService.detenerCaptura()
+            cameraService.desactivarDeteccionDocumento()
+
+            // Capturar la foto original
+            guard let foto = await cameraService.capturarFoto() else {
+                capturando = false
+                procesandoPreview = false
+                cameraService.activarDeteccionDocumento()
+                return
             }
+
+            fotoOriginal = foto
+            cameraService.detenerCaptura()
+
+            // Detectar y recortar el documento para mostrar en preview
+            if let documentoRecortado = try? await faceDetectionService.detectarYRecortarDocumento(en: foto) {
+                fotoPreview = documentoRecortado
+            } else {
+                // Si no detecta documento, mostrar la foto original
+                fotoPreview = foto
+            }
+
+            mostrandoPreview = true
+            capturando = false
+            procesandoPreview = false
         }
     }
 
@@ -392,13 +447,39 @@ struct CapturaINEView: View {
 
     private func repetirFoto() {
         fotoPreview = nil
+        fotoOriginal = nil
         mostrandoPreview = false
+        tiempoDocumentoDetectado = nil
+        cameraService.activarDeteccionDocumento()
         cameraService.iniciarCaptura()
     }
 
     private func usarFoto() {
-        if let foto = fotoPreview {
+        // Enviar la foto original (sin recortar) para procesamiento completo
+        if let foto = fotoOriginal {
             onCaptura(foto)
+        }
+    }
+
+    private func manejarCambioDeteccion(detectado: Bool) {
+        guard autoCapturaHabilitada && !capturando && !mostrandoPreview else { return }
+
+        if detectado && !cameraService.estaEnfocando {
+            // Documento detectado y enfocado
+            if tiempoDocumentoDetectado == nil {
+                tiempoDocumentoDetectado = Date()
+                // Programar auto-captura después de 1 segundo de estabilidad
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(tiempoEsperaAutoCaptura * 1_000_000_000))
+                    // Verificar que el documento sigue detectado y no estamos capturando
+                    if cameraService.documentoDetectado && !cameraService.estaEnfocando && !capturando && !mostrandoPreview && autoCapturaHabilitada {
+                        capturarFoto()
+                    }
+                }
+            }
+        } else {
+            // Documento perdido o enfocando, reiniciar contador
+            tiempoDocumentoDetectado = nil
         }
     }
 

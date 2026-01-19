@@ -6,6 +6,7 @@
 @preconcurrency import AVFoundation
 import UIKit
 import Combine
+import Vision
 
 enum CameraError: Error {
     case noAccesoPermitido
@@ -73,12 +74,28 @@ class CameraService: NSObject, ObservableObject {
     @Published var flashActivado = false
     @Published var lentesDisponibles: [LenteCamara] = []
 
+    // Detección de documento en tiempo real
+    @Published var documentoDetectado = false
+    @Published var boundingBoxDocumento: CGRect?
+
     private var captureSession: AVCaptureSession?
     private var photoOutput: AVCapturePhotoOutput?
+    private var videoDataOutput: AVCaptureVideoDataOutput?
     private var currentDevice: AVCaptureDevice?
     private var currentCamera: TipoCamara = .trasera
     private var capturaCompletion: ((UIImage?) -> Void)?
     private var focusObservation: NSKeyValueObservation?
+
+    // Document detection (thread-safe con nonisolated(unsafe))
+    nonisolated(unsafe) private var _documentDetectionEnabled = false
+    nonisolated(unsafe) private var _isProcessingFrame = false
+    private let detectionLock = NSLock()
+    private let videoDataQueue = DispatchQueue(label: "com.kyc.videodata", qos: .userInitiated)
+
+    // Captura silenciosa desde video stream
+    nonisolated(unsafe) private var _captureNextFrame = false
+    nonisolated(unsafe) private var _capturedFrame: UIImage?
+    private var silentCaptureCompletion: ((UIImage?) -> Void)?
 
     // MARK: - Permisos
 
@@ -200,13 +217,22 @@ class CameraService: NSObject, ObservableObject {
             session.addInput(input)
         }
 
-        // Output
+        // Photo Output
         let output = AVCapturePhotoOutput()
         if session.canAddOutput(output) {
             session.addOutput(output)
         }
 
+        // Video Data Output (para detección en tiempo real)
+        let videoOutput = AVCaptureVideoDataOutput()
+        videoOutput.setSampleBufferDelegate(self, queue: videoDataQueue)
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        if session.canAddOutput(videoOutput) {
+            session.addOutput(videoOutput)
+        }
+
         photoOutput = output
+        videoDataOutput = videoOutput
         captureSession = session
 
         // Preview layer
@@ -236,6 +262,53 @@ class CameraService: NSObject, ObservableObject {
     }
 
     func capturarFoto() async -> UIImage? {
+        // Usar captura silenciosa desde video stream (sin sonido de obturador)
+        return await capturarFotoSilenciosa()
+    }
+
+    /// Captura una foto silenciosamente desde el video stream (sin sonido de obturador)
+    func capturarFotoSilenciosa() async -> UIImage? {
+        // Esperar a que el enfoque se estabilice (máximo 1.5 segundos)
+        var esperaEnfoque = 0
+        while estaEnfocando && esperaEnfoque < 15 {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+            esperaEnfoque += 1
+        }
+
+        // Pequeña pausa adicional para asegurar estabilidad
+        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+
+        return await withCheckedContinuation { continuation in
+            // Marcar para capturar el próximo frame
+            detectionLock.lock()
+            _captureNextFrame = true
+            _capturedFrame = nil
+            detectionLock.unlock()
+
+            self.silentCaptureCompletion = { imagen in
+                continuation.resume(returning: imagen)
+            }
+
+            // Timeout de 2 segundos por si no llega frame
+            Task {
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                self.detectionLock.lock()
+                let stillWaiting = self._captureNextFrame
+                self.detectionLock.unlock()
+
+                if stillWaiting {
+                    self.detectionLock.lock()
+                    self._captureNextFrame = false
+                    self.detectionLock.unlock()
+                    self.silentCaptureCompletion?(nil)
+                    self.silentCaptureCompletion = nil
+                }
+            }
+        }
+    }
+
+    /// Captura foto con sonido (usando AVCapturePhotoOutput)
+    func capturarFotoConSonido() async -> UIImage? {
         guard let photoOutput = photoOutput else { return nil }
 
         // Esperar a que el enfoque se estabilice (máximo 1.5 segundos)
@@ -455,6 +528,28 @@ class CameraService: NSObject, ObservableObject {
         return imagenNormalizada ?? imagen
     }
 
+    // MARK: - Detección de Documento en Tiempo Real
+
+    /// Activa la detección de documentos en tiempo real
+    func activarDeteccionDocumento() {
+        detectionLock.lock()
+        _documentDetectionEnabled = true
+        detectionLock.unlock()
+        documentoDetectado = false
+        boundingBoxDocumento = nil
+        print("CameraService: Detección de documento activada")
+    }
+
+    /// Desactiva la detección de documentos
+    func desactivarDeteccionDocumento() {
+        detectionLock.lock()
+        _documentDetectionEnabled = false
+        detectionLock.unlock()
+        documentoDetectado = false
+        boundingBoxDocumento = nil
+        print("CameraService: Detección de documento desactivada")
+    }
+
     /// Captura foto y la recorta al área visible del preview con un rect específico
     func capturarFotoRecortada(previewBounds: CGRect, cropRect: CGRect) async -> UIImage? {
         guard let foto = await capturarFoto(),
@@ -556,6 +651,108 @@ extension CameraService: AVCapturePhotoCaptureDelegate {
             self.capturaCompletion?(imagenCorregida)
             self.capturaCompletion = nil
         }
+    }
+}
+
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+extension CameraService: AVCaptureVideoDataOutputSampleBufferDelegate {
+    nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        // Verificar si hay solicitud de captura silenciosa
+        detectionLock.lock()
+        let shouldCapture = _captureNextFrame
+        if shouldCapture {
+            _captureNextFrame = false
+        }
+        detectionLock.unlock()
+
+        if shouldCapture {
+            // Capturar frame actual como imagen
+            if let image = imageFromSampleBuffer(sampleBuffer) {
+                Task { @MainActor [weak self] in
+                    // Corregir orientación si es cámara frontal
+                    let imagenCorregida: UIImage
+                    if self?.currentCamera == .frontal {
+                        imagenCorregida = image.withHorizontallyFlippedOrientation()
+                    } else {
+                        imagenCorregida = image
+                    }
+                    self?.silentCaptureCompletion?(imagenCorregida)
+                    self?.silentCaptureCompletion = nil
+                }
+            }
+            return // No procesar detección en este frame
+        }
+
+        // Rate limiting con lock para evitar procesamiento excesivo
+        detectionLock.lock()
+        let shouldProcess = !_isProcessingFrame && _documentDetectionEnabled
+        if shouldProcess {
+            _isProcessingFrame = true
+        }
+        detectionLock.unlock()
+
+        guard shouldProcess else { return }
+
+        // Defer para liberar el flag al terminar
+        defer {
+            detectionLock.lock()
+            _isProcessingFrame = false
+            detectionLock.unlock()
+        }
+
+        // El sampleBuffer solo es válido dentro de este callback, procesarlo inmediatamente
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // Ejecutar detección sincrónicamente en este hilo (videoDataQueue)
+        let request = VNDetectRectanglesRequest()
+        request.minimumAspectRatio = 0.5
+        request.maximumAspectRatio = 2.0
+        request.minimumSize = 0.15
+        request.minimumConfidence = 0.7
+        request.maximumObservations = 1
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+
+        let detected: Bool
+        let boundingBox: CGRect?
+
+        do {
+            try handler.perform([request])
+
+            if let rect = request.results?.first {
+                let area = rect.boundingBox.width * rect.boundingBox.height
+                let confianzaAlta = rect.confidence > 0.8
+                let tamanoAdecuado = area > 0.15
+                detected = confianzaAlta && tamanoAdecuado
+                boundingBox = detected ? rect.boundingBox : nil
+            } else {
+                detected = false
+                boundingBox = nil
+            }
+        } catch {
+            detected = false
+            boundingBox = nil
+        }
+
+        // Actualizar UI en MainActor
+        Task { @MainActor [weak self] in
+            self?.documentoDetectado = detected
+            self?.boundingBoxDocumento = boundingBox
+        }
+    }
+
+    /// Convierte un CMSampleBuffer a UIImage
+    nonisolated private func imageFromSampleBuffer(_ sampleBuffer: CMSampleBuffer) -> UIImage? {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext()
+
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+
+        // La imagen del video viene rotada, corregir orientación
+        return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
     }
 }
 
