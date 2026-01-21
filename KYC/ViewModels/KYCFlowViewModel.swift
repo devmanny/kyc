@@ -23,6 +23,13 @@ class KYCFlowViewModel: ObservableObject {
     @Published var livenessInstruccion: String = ""
     @Published var livenessProgreso: Float = 0
 
+    // Modo repetición - indica si estamos repitiendo una captura específica
+    enum ModoRepeticionINE {
+        case frente
+        case reverso
+    }
+    private var modoRepeticion: ModoRepeticionINE?
+
     // Servicios
     private let ocrService = OCRService()
     private let faceDetectionService = FaceDetectionService()
@@ -75,13 +82,56 @@ class KYCFlowViewModel: ObservableObject {
 
     func capturarFrenteINE(_ imagen: UIImage) {
         documentoINE.imagenFrente = imagen
-        estadoActual = .capturandoReversoINE
+
+        // Si estamos en modo repetición, volver a procesamiento y reprocesar
+        if modoRepeticion == .frente {
+            modoRepeticion = nil
+            estadoActual = .procesandoINE
+            procesarINE()
+        } else {
+            // Flujo normal: continuar al reverso
+            estadoActual = .capturandoReversoINE
+        }
     }
 
     func capturarReversoINE(_ imagen: UIImage) {
         documentoINE.imagenReverso = imagen
+
+        // Siempre ir a procesamiento (tanto en flujo normal como en repetición)
+        modoRepeticion = nil
         estadoActual = .procesandoINE
         procesarINE()
+    }
+
+    // MARK: - Repetición de capturas INE
+
+    /// Inicia la repetición del frente de la INE
+    /// Después de capturar, regresa a procesamiento sin pedir el reverso
+    func repetirFrenteINE() {
+        modoRepeticion = .frente
+        // Limpiar datos que dependen del frente
+        documentoINE.imagenFrente = nil
+        documentoINE.datosFrente = nil
+        documentoINE.imagenRostro = nil
+        documentoINE.validacion = nil
+        estadoActual = .capturandoFrenteINE
+    }
+
+    /// Inicia la repetición del reverso de la INE
+    /// Después de capturar, regresa a procesamiento
+    func repetirReversoINE() {
+        modoRepeticion = .reverso
+        // Limpiar datos que dependen del reverso
+        documentoINE.imagenReverso = nil
+        documentoINE.datosReverso = nil
+        documentoINE.validacion = nil
+        estadoActual = .capturandoReversoINE
+    }
+
+    /// Cancela el modo repetición y regresa a procesamiento
+    func cancelarRepeticion() {
+        modoRepeticion = nil
+        estadoActual = .procesandoINE
     }
 
     func continuarASelfies() {
@@ -191,6 +241,8 @@ class KYCFlowViewModel: ObservableObject {
                 }
 
                 // 4. Detectar y recortar rostro de la INE (usando imagen ya recortada del documento)
+                // IMPORTANTE: Se busca el rostro en la parte IZQUIERDA de la INE (foto principal)
+                // para evitar confusión con la miniatura que aparece a la derecha
                 if let imagenFrente = imagenFrenteProcesada {
                     mensajeProcesamiento = "Detectando rostro en INE..."
                     if let rostro = try await faceDetectionService.detectarYRecortarRostroDeINE(de: imagenFrente) {
@@ -199,7 +251,7 @@ class KYCFlowViewModel: ObservableObject {
                     } else {
                         // NO usar fallback - si no hay rostro, no continuar
                         print("ViewModel: ERROR - No se detectó rostro en la INE")
-                        mensajeError = "No se detectó el rostro en la fotografía de la INE. Por favor, vuelve a capturar el frente de la INE con mejor iluminación y enfoque."
+                        mensajeError = "No se detectó la fotografía principal en tu INE. Asegúrate de que la foto grande (lado izquierdo de la credencial) sea claramente visible. Por favor, vuelve a escanear el frente de la INE."
                         documentoINE.imagenRostro = nil
                     }
                 }
@@ -293,6 +345,7 @@ class KYCFlowViewModel: ObservableObject {
         mensajeProcesamiento = ""
         livenessPasado = false
         livenessProgreso = 0
+        modoRepeticion = nil
     }
 }
 

@@ -35,7 +35,9 @@ struct KYCFlowView: View {
                         estaProcesando: viewModel.estaProcesando,
                         mensajeProcesamiento: viewModel.mensajeProcesamiento,
                         onContinuar: viewModel.continuarASelfies,
-                        onRegresar: viewModel.regresarAReversoINE
+                        onRegresar: viewModel.regresarAReversoINE,
+                        onRepetirFrente: viewModel.repetirFrenteINE,
+                        onRepetirReverso: viewModel.repetirReversoINE
                     )
 
                 case .livenessCheck(let challenge):
@@ -94,6 +96,12 @@ struct ProcesamientoINEView: View {
     let mensajeProcesamiento: String
     let onContinuar: () -> Void
     let onRegresar: () -> Void
+    let onRepetirFrente: () -> Void
+    let onRepetirReverso: () -> Void
+
+    // Estado para diálogos de confirmación
+    @State private var mostrarDialogoFrente = false
+    @State private var mostrarDialogoReverso = false
 
     var body: some View {
         VStack(spacing: 24) {
@@ -108,7 +116,7 @@ struct ProcesamientoINEView: View {
                     .fontWeight(.bold)
                     .padding(.top, 24)
 
-                // Mostrar imágenes capturadas
+                // Mostrar imágenes capturadas (tappeables para repetir)
                 HStack(spacing: 16) {
                     VStack {
                         if let frente = documento.imagenFrente {
@@ -117,10 +125,21 @@ struct ProcesamientoINEView: View {
                                 .aspectRatio(contentMode: .fit)
                                 .frame(height: 120)
                                 .cornerRadius(8)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color.blue.opacity(0.3), lineWidth: 2)
+                                )
+                                .onTapGesture {
+                                    mostrarDialogoFrente = true
+                                }
                         }
-                        Text("Frente")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 4) {
+                            Text("Frente")
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption2)
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     }
 
                     VStack {
@@ -130,13 +149,28 @@ struct ProcesamientoINEView: View {
                                 .aspectRatio(contentMode: .fit)
                                 .frame(height: 120)
                                 .cornerRadius(8)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 8)
+                                        .stroke(Color.blue.opacity(0.3), lineWidth: 2)
+                                )
+                                .onTapGesture {
+                                    mostrarDialogoReverso = true
+                                }
                         }
-                        Text("Reverso")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        HStack(spacing: 4) {
+                            Text("Reverso")
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption2)
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     }
                 }
                 .padding()
+                // Hint para el usuario
+                Text("Toca una imagen para repetir la captura")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
 
                 // Datos extraídos por OCR
                 ScrollView {
@@ -277,6 +311,24 @@ struct ProcesamientoINEView: View {
                     }
                 }
             }
+        }
+        // Diálogo para repetir frente
+        .alert("Repetir Frente", isPresented: $mostrarDialogoFrente) {
+            Button("Cancelar", role: .cancel) { }
+            Button("Repetir") {
+                onRepetirFrente()
+            }
+        } message: {
+            Text("¿Quieres volver a capturar el frente de tu INE?")
+        }
+        // Diálogo para repetir reverso
+        .alert("Repetir Reverso", isPresented: $mostrarDialogoReverso) {
+            Button("Cancelar", role: .cancel) { }
+            Button("Repetir") {
+                onRepetirReverso()
+            }
+        } message: {
+            Text("¿Quieres volver a capturar el reverso de tu INE?")
         }
     }
 

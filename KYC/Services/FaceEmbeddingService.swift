@@ -2,8 +2,9 @@
 //  FaceEmbeddingService.swift
 //  KYC
 //
-//  Servicio de comparación facial usando landmarks biométricos
-//  Implementación real basada en geometría facial, NO Feature Print
+//  Servicio de comparación facial
+//  Usa ArcFace (Core ML) como método primario para máxima precisión
+//  Fallback a landmarks geométricos si el modelo no está disponible
 //
 
 import Vision
@@ -11,6 +12,11 @@ import UIKit
 import Accelerate
 
 actor FaceEmbeddingService {
+
+    // MARK: - ArcFace Service
+
+    /// Servicio ArcFace para comparación de alta precisión
+    private let arcFaceService = ArcFaceService()
 
     // MARK: - Tipos
 
@@ -254,7 +260,21 @@ actor FaceEmbeddingService {
     // MARK: - Comparación de Rostros
 
     /// Compara dos imágenes de rostros y retorna similitud entre 0.0 y 1.0
+    /// Usa ArcFace (deep learning) si está disponible, landmarks como fallback
     func compararRostros(_ imagen1: UIImage, _ imagen2: UIImage) async throws -> Float {
+        // Intentar usar ArcFace primero (mucho más preciso)
+        if await arcFaceService.modeloDisponible {
+            do {
+                let similitud = try await arcFaceService.compararRostros(imagen1, imagen2)
+                print("FaceEmbedding: Usando ArcFace - similitud: \(String(format: "%.2f", similitud * 100))%")
+                return similitud
+            } catch {
+                print("FaceEmbedding: Error en ArcFace, usando fallback - \(error.localizedDescription)")
+            }
+        }
+
+        // Fallback a landmarks geométricos
+        print("FaceEmbedding: Usando landmarks geométricos (fallback)")
         let embedding1 = try await generarEmbedding(de: imagen1)
         let embedding2 = try await generarEmbedding(de: imagen2)
         return embedding1.similitud(con: embedding2)
@@ -269,9 +289,63 @@ actor FaceEmbeddingService {
         datosPersona: DatosINEFrente?
     ) async throws -> ResultadoVerificacion {
 
-        print("FaceEmbedding: Iniciando verificación con landmarks biométricos...")
+        // Verificar si ArcFace está disponible
+        let usandoArcFace = await arcFaceService.modeloDisponible
 
-        // Generar embeddings faciales
+        if usandoArcFace {
+            print("FaceEmbedding: ✓ Usando ArcFace (deep learning) para verificación de alta precisión")
+            return try await verificarConArcFace(
+                rostroINE: rostroINE,
+                selfieCercana: selfieCercana,
+                selfieLejana: selfieLejana,
+                datosPersona: datosPersona
+            )
+        } else {
+            print("FaceEmbedding: ⚠️ ArcFace no disponible, usando landmarks geométricos (menos preciso)")
+            return try await verificarConLandmarks(
+                rostroINE: rostroINE,
+                selfieCercana: selfieCercana,
+                selfieLejana: selfieLejana,
+                datosPersona: datosPersona
+            )
+        }
+    }
+
+    /// Verificación usando ArcFace (deep learning) - Alta precisión
+    private func verificarConArcFace(
+        rostroINE: UIImage,
+        selfieCercana: UIImage,
+        selfieLejana: UIImage,
+        datosPersona: DatosINEFrente?
+    ) async throws -> ResultadoVerificacion {
+
+        // Comparar rostros con ArcFace
+        let simINEvsCercana = try await arcFaceService.compararRostros(rostroINE, selfieCercana)
+        let simINEvsLejana = try await arcFaceService.compararRostros(rostroINE, selfieLejana)
+        let simCercanavsLejana = try await arcFaceService.compararRostros(selfieCercana, selfieLejana)
+
+        print("FaceEmbedding [ArcFace]: INE vs Cercana: \(String(format: "%.2f", simINEvsCercana * 100))%")
+        print("FaceEmbedding [ArcFace]: INE vs Lejana: \(String(format: "%.2f", simINEvsLejana * 100))%")
+        print("FaceEmbedding [ArcFace]: Cercana vs Lejana: \(String(format: "%.2f", simCercanavsLejana * 100))%")
+
+        // ArcFace usa umbrales más estrictos (típicamente 0.4-0.5 para match)
+        return ResultadoVerificacion.determinarArcFace(
+            ineVsCercana: simINEvsCercana,
+            ineVsLejana: simINEvsLejana,
+            cercanaVsLejana: simCercanavsLejana,
+            datosPersona: datosPersona
+        )
+    }
+
+    /// Verificación usando landmarks geométricos - Fallback
+    private func verificarConLandmarks(
+        rostroINE: UIImage,
+        selfieCercana: UIImage,
+        selfieLejana: UIImage,
+        datosPersona: DatosINEFrente?
+    ) async throws -> ResultadoVerificacion {
+
+        // Generar embeddings faciales con landmarks
         let embeddingINE = try await generarEmbedding(de: rostroINE)
         let embeddingCercana = try await generarEmbedding(de: selfieCercana)
         let embeddingLejana = try await generarEmbedding(de: selfieLejana)
@@ -281,11 +355,9 @@ actor FaceEmbeddingService {
         let simINEvsLejana = embeddingINE.similitud(con: embeddingLejana)
         let simCercanavsLejana = embeddingCercana.similitud(con: embeddingLejana)
 
-        print("FaceEmbedding: INE vs Cercana: \(String(format: "%.2f", simINEvsCercana * 100))%")
-        print("FaceEmbedding: INE vs Lejana: \(String(format: "%.2f", simINEvsLejana * 100))%")
-        print("FaceEmbedding: Cercana vs Lejana: \(String(format: "%.2f", simCercanavsLejana * 100))%")
-        print("FaceEmbedding: Proporciones INE: \(embeddingINE.proportions)")
-        print("FaceEmbedding: Proporciones Cercana: \(embeddingCercana.proportions)")
+        print("FaceEmbedding [Landmarks]: INE vs Cercana: \(String(format: "%.2f", simINEvsCercana * 100))%")
+        print("FaceEmbedding [Landmarks]: INE vs Lejana: \(String(format: "%.2f", simINEvsLejana * 100))%")
+        print("FaceEmbedding [Landmarks]: Cercana vs Lejana: \(String(format: "%.2f", simCercanavsLejana * 100))%")
 
         return ResultadoVerificacion.determinar(
             ineVsCercana: simINEvsCercana,
