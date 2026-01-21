@@ -94,15 +94,41 @@ actor FaceDetectionService {
                     return
                 }
 
-                // Tomar el rostro con más landmarks y mejor confianza
-                let rostroMejor = rostrosValidos.max { a, b in
-                    let scoreA = a.confidence + Float(contarLandmarks(a.landmarks))
-                    let scoreB = b.confidence + Float(contarLandmarks(b.landmarks))
-                    return scoreA < scoreB
+                // IMPORTANTE: En INE la foto principal está en la mitad IZQUIERDA
+                // Filtrar rostros que estén en la mitad izquierda (x < 0.5)
+                // También considerar rostros centrados que se extienden hacia la izquierda
+                let rostrosEnIzquierda = rostrosValidos.filter { rostro in
+                    let box = rostro.boundingBox
+                    // El centro del rostro debe estar en el 60% izquierdo de la imagen
+                    // Usamos 0.6 para dar un poco de margen por si la foto está ligeramente descentrada
+                    let centroX = box.midX
+                    let estaEnIzquierda = centroX < 0.6
+                    print("FaceDetection: Rostro en x=\(centroX) - \(estaEnIzquierda ? "IZQUIERDA ✓" : "DERECHA (miniatura)")")
+                    return estaEnIzquierda
+                }
+
+                // Si hay rostros en la izquierda, usar esos; si no, el rostro no es válido
+                let candidatos: [VNFaceObservation]
+                if !rostrosEnIzquierda.isEmpty {
+                    candidatos = rostrosEnIzquierda
+                    print("FaceDetection: Usando \(candidatos.count) rostro(s) de la mitad izquierda")
+                } else {
+                    // No hay rostros válidos en la parte izquierda
+                    print("FaceDetection: ⚠️ No se encontró rostro en la parte izquierda de la INE")
+                    print("FaceDetection: Solo se encontraron rostros en la parte derecha (posiblemente la miniatura)")
+                    continuation.resume(returning: nil)
+                    return
+                }
+
+                // De los candidatos, tomar el más grande (la foto principal es más grande que la miniatura)
+                let rostroMejor = candidatos.max { a, b in
+                    let areaA = a.boundingBox.width * a.boundingBox.height
+                    let areaB = b.boundingBox.width * b.boundingBox.height
+                    return areaA < areaB
                 }
 
                 if let rostro = rostroMejor {
-                    print("FaceDetection: Rostro FINAL seleccionado - box: \(rostro.boundingBox)")
+                    print("FaceDetection: Rostro FINAL seleccionado - box: \(rostro.boundingBox), área: \(rostro.boundingBox.width * rostro.boundingBox.height)")
                 }
 
                 continuation.resume(returning: rostroMejor?.boundingBox)
